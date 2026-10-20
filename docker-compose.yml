@@ -1,0 +1,245 @@
+# =============================================================================
+# Bayora — Secure Adversarial AI Testing Sandbox
+# Docker Compose Configuration
+#
+# Architecture:
+#   net-red     (internal): red ↔ gateway
+#   net-blue    (internal): blue ↔ gateway
+#   net-llm     (internal): gateway ↔ client-llm
+#   net-control          : control-plane ↔ gateway ↔ postgres
+#
+# Red and Blue share NO network. Client LLM is reachable ONLY through
+# the policy gateway. This enforces the "no direct path" invariant.
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — audit trail and metadata store
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: bayora-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-bayora}
+      POSTGRES_USER: ${POSTGRES_USER:-bayora}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-bayora_dev_password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - net-control
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bayora}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Control Plane — FastAPI backend (auth, orchestration, audit)
+  # Exposed to the host on port 8000 for the dashboard.
+  # ---------------------------------------------------------------------------
+  control-plane:
+    build: ./control-plane
+    container_name: bayora-control-plane
+    ports:
+      - "${CONTROL_PLANE_PORT:-8000}:8000"
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-bayora}:${POSTGRES_PASSWORD:-bayora_dev_password}@postgres:5432/${POSTGRES_DB:-bayora}"
+      JWT_SECRET: ${JWT_SECRET:-bayora_dev_jwt_secret_change_me}
+      HMAC_SECRET: ${HMAC_SECRET:-bayora_dev_hmac_secret_change_me}
+      GATEWAY_URL: "http://gateway:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - net-control
+    cap_drop:
+      - ALL
+    cap_add:
+      # Needed for Python to bind to port 8000 inside the container
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Policy Gateway — the ONLY path between teams and the Client LLM.
+  # Enforces allowlists, rate limits, output filtering, and timing
+  # normalization. Connected to ALL internal networks.
+  # ---------------------------------------------------------------------------
+  gateway:
+    build: ./gateway
+    container_name: bayora-gateway
+    environment:
+      CONTROL_PLANE_URL: "http://control-plane:8000"
+      CLIENT_LLM_URL: "http://client-llm:8000"
+      RED_URL: "http://red:8000"
+      BLUE_URL: "http://blue:8000"
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    networks:
+      - net-red
+      - net-blue
+      - net-llm
+      - net-control
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Red Team Sandbox — adversarial prompt generation and attack simulation
+  # Isolated to net-red; can only reach the gateway.
+  # ---------------------------------------------------------------------------
+  red:
+    build: ./sandboxes/red
+    container_name: bayora-red
+    environment:
+      TEAM: red
+      GATEWAY_URL: "http://gateway:8000"
+      PYTHONDONTWRITEBYTECODE: "1"
+    networks:
+      - net-red
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=sandboxes/seccomp-profile.json
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
+      - /app/scratch:size=32M
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+          pids: 64
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Blue Team Sandbox — defensive countermeasures and classifier logic
+  # Isolated to net-blue; can only reach the gateway.
+  # ---------------------------------------------------------------------------
+  blue:
+    build: ./sandboxes/blue
+    container_name: bayora-blue
+    environment:
+      TEAM: blue
+      GATEWAY_URL: "http://gateway:8000"
+      PYTHONDONTWRITEBYTECODE: "1"
+    networks:
+      - net-blue
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=sandboxes/seccomp-profile.json
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
+      - /app/scratch:size=32M
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+          pids: 64
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Client LLM — deterministic mock model under test.
+  # Isolated to net-llm; reachable ONLY through the gateway.
+  # ---------------------------------------------------------------------------
+  client-llm:
+    build: ./sandboxes/client-llm
+    container_name: bayora-client-llm
+    environment:
+      TEAM: client-llm
+      PYTHONDONTWRITEBYTECODE: "1"
+    networks:
+      - net-llm
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=sandboxes/seccomp-profile.json
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
+      - /app/scratch:size=32M
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+          pids: 64
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+# =============================================================================
+# Networks — enforce the "no direct path" between Red and Blue
+# =============================================================================
+networks:
+  net-red:
+    driver: bridge
+    internal: true           # No external/internet access
+    name: bayora-net-red
+  net-blue:
+    driver: bridge
+    internal: true
+    name: bayora-net-blue
+  net-llm:
+    driver: bridge
+    internal: true
+    name: bayora-net-llm
+  net-control:
+    driver: bridge
+    name: bayora-net-control  # Not internal — control-plane serves the dashboard
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  pgdata:
+    name: bayora-pgdata
