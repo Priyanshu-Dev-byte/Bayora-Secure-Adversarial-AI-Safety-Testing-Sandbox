@@ -160,4 +160,22 @@ Open **[http://localhost:5173](http://localhost:5173)** in your browser.
 
 ## 👥 Team Dark Panthers
 - **Priyanshu** — Full Stack & Cloud Infrastructure / Architecture
+- **Anagh** — Cyber Security & AI Safety
+
 - **Hack in Hills '26** — Problem Statement 04: Securing Adversarial AI Safety Testing Infrastructure
+
+## 🛠️ Tech Stack
+### Backend (Control Plane & Gateway)
+- **Language**: Python 3.11+
+- **Framework**: FastAPI
+- **Database**: PostgreSQL 14+
+- **Networking**: Linux Bridge (`net-control`, `net-red`, `net-blue`)
+
+### Frontend (React Dashboard)
+- **Framework**: React 19 + Vite
+- **UI Library**: Tailwind CSS 4
+- **State Management**: Zustand
+
+### Infrastructure
+- **Containerization**: Docker Compose
+- **Security**: Seccomp (SCMP_ACT_ERRNO), Linux capabilities drop, Read-only rootfs
